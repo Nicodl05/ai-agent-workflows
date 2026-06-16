@@ -1,4 +1,4 @@
-name: Claude Issue Handler
+name: Mistral Issue Handler
 
 on:
   issues:
@@ -10,14 +10,13 @@ permissions:
   issues: write
 
 jobs:
-  claude:
-    if: github.event.label.name == 'claude'
-    uses: Nicodl05/claude-workflows/.github/workflows/claude-issue.yml@main
+  mistral:
+    if: github.event.label.name == 'mistral'
+    uses: Nicodl05/ai-agent-workflows/.github/workflows/mistral-issue.yml@main
     with:
       issue_number: ${{ github.event.issue.number }}
       issue_title: ${{ github.event.issue.title }}
       issue_body: ${{ github.event.issue.body || '' }}
-      issue_labels: ${{ toJson(github.event.issue.labels.*.name) }}
     secrets:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      AI_API_KEY: ${{ secrets.AI_API_KEY }}
       GH_PAT: ${{ secrets.GH_PAT }}

@@ -1,38 +1,38 @@
-# claude-workflows
+# ai-agent-workflows
 
-Reusable GitHub Actions workflows for automating issue resolution with Claude Code.
+Reusable GitHub Actions workflow that automatically implements a labelled issue
+in the cloud using the Mistral API (or any OpenAI-compatible provider) and opens
+a pull request.
 
-## What this repo does
+When an issue is labelled `mistral`, a hosted GitHub runner:
 
-This repository exposes a reusable workflow (`claude-issue.yml`) that, when called from a project repository, automatically:
+1. Creates a branch `feature/issue-{number}-{slug}` from `main`.
+2. Runs `scripts/ai_agent.py`, which sends the issue to the Mistral chat
+   completions endpoint and applies the returned file changes.
+3. Resets `.github/workflows/` so CI definitions in the target repo are never
+   modified.
+4. Commits with a conventional message and pushes the branch.
+5. Opens a pull request that closes the issue, tagged `awaiting-review`.
+6. Comments on the issue with the pull request URL.
 
-1. Creates a branch named `feature/issue-{id}-{slug}` from main.
-2. Runs Claude Code in headless mode with the issue context as prompt.
-3. Commits any changes produced by Claude Code, excluding `.github/workflows/` files.
-4. Opens a pull request referencing the issue with the label `awaiting-review`.
-5. Posts a comment on the issue with the pull request URL.
+Everything runs on a GitHub-hosted runner. No self-hosted infrastructure is
+required.
 
-Claude Code follows the quality rules defined in the global `CLAUDE.md`:
-- Reads the Graphify graph of the target repository if available.
-- Fetches up-to-date documentation via the context7 MCP server.
-- Writes or updates tests for every change.
-- Creates an ADR in `docs/adr/` when an architecture decision is made.
-- Uses conventional commits and English-only identifiers.
+## Note on the Claude case
 
-## How to add the workflow to a new project
+This repository covers **only** the Mistral cloud provider. The Claude case is
+handled **separately and locally** via the `/fetch-issues` slash command in
+Claude Code. Do not look for or add a Claude workflow here.
+
+## How to add the workflow to a project
 
 ### 1. Copy the caller workflow
 
-Copy `docs/caller-template.yml` from this repository into your project at:
-
-```
-.github/workflows/claude-issue.yml
-```
-
-The file content:
+Copy [`docs/mistral-caller.yml`](docs/mistral-caller.yml) into the target
+project at `.github/workflows/mistral-issue.yml`:
 
 ```yaml
-name: Claude Issue Handler
+name: Mistral Issue Handler
 
 on:
   issues:
@@ -42,50 +42,78 @@ permissions:
   contents: write
   pull-requests: write
   issues: write
-  workflows: write
 
 jobs:
-  claude:
-    if: github.event.label.name == 'claude'
-    uses: Nicodl05/claude-workflows/.github/workflows/claude-issue.yml@main
+  mistral:
+    if: github.event.label.name == 'mistral'
+    uses: Nicodl05/ai-agent-workflows/.github/workflows/mistral-issue.yml@main
     with:
       issue_number: ${{ github.event.issue.number }}
       issue_title: ${{ github.event.issue.title }}
       issue_body: ${{ github.event.issue.body || '' }}
-      issue_labels: ${{ toJson(github.event.issue.labels.*.name) }}
     secrets:
-      ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+      AI_API_KEY: ${{ secrets.AI_API_KEY }}
       GH_PAT: ${{ secrets.GH_PAT }}
 ```
 
-### 2. Add secrets
+### 2. Configure repository variables (optional)
 
-In your project repository, go to **Settings > Secrets and variables > Actions** and create two secrets:
+The provider defaults to Mistral. Override it through **Settings > Secrets and
+variables > Actions > Variables**:
 
-| Name | Value |
+| Variable | Default | When to set |
+|---|---|---|
+| `AI_PROVIDER` | `mistral` | `openrouter` or `custom` to switch provider |
+| `AI_MODEL` | provider default | Required for `openrouter` and `custom` |
+| `AI_BASE_URL` | provider default | Required for `custom` |
+
+With the default `mistral` provider the model is `mistral-medium-latest` and no
+variable is needed.
+
+### 3. Add repository secrets
+
+In **Settings > Secrets and variables > Actions > Secrets**:
+
+| Secret | Value |
 |---|---|
-| `ANTHROPIC_API_KEY` | Your Anthropic API key |
-| `GH_PAT` | A GitHub Personal Access Token (see scopes below) |
+| `AI_API_KEY` | API key for the chosen provider |
+| `GH_PAT` | GitHub Personal Access Token (see scopes below) |
 
-#### Required GH_PAT scopes
-
-The PAT is required because the default `GITHUB_TOKEN` cannot push to `.github/workflows/` files or trigger other workflows. Create it at **github.com > Settings > Developer settings > Personal access tokens > Fine-grained tokens** with the following repository permissions on the target project repo:
+The PAT is required because the default `GITHUB_TOKEN` cannot trigger downstream
+workflows or push protected paths. Create a fine-grained token at
+**github.com > Settings > Developer settings > Personal access tokens** with
+these repository permissions:
 
 | Permission | Access |
 |---|---|
 | Contents | Read and write |
-| Pull requests | Read and write |
-| Issues | Read and write |
 | Workflows | Read and write |
+| Issues | Read and write |
+| Pull requests | Read and write |
 
-### 3. Create the `claude` label
+### 4. Create the `mistral` label
 
-In your project repository, go to **Issues > Labels** and create a label named exactly `claude`.
+In the target repository, go to **Issues > Labels** and create a label named
+exactly `mistral`. Adding it to any open issue triggers the workflow.
 
-Once both secrets and the label are in place, adding the `claude` label to any open issue will trigger the workflow.
+## Supported providers
 
-## Requirements
+| Provider | `AI_PROVIDER` | Base URL | Default model | Free tier |
+|---|---|---|---|---|
+| Mistral | `mistral` | `https://api.mistral.ai/v1` | `mistral-medium-latest` | Free experimentation tier with rate limits on `la Plateforme` |
+| OpenRouter | `openrouter` | `https://openrouter.ai/api/v1` | set via `AI_MODEL` | Several `:free` models available at no cost |
+| Custom | `custom` | set via `AI_BASE_URL` | set via `AI_MODEL` | Depends on the upstream OpenAI-compatible endpoint |
 
-- The calling repository must declare `permissions: {contents: write, pull-requests: write, issues: write, workflows: write}` at the workflow level.
-- The default branch must be named `main`.
-- The `awaiting-review` label must exist in the calling repository if you want the pull request to be tagged automatically (the workflow will not fail if it is missing, the label will simply be skipped).
+## Repository layout
+
+```
+ai-agent-workflows/
+├── .github/workflows/
+│   └── mistral-issue.yml      # reusable workflow (workflow_call)
+├── scripts/
+│   └── ai_agent.py            # provider-agnostic implementation agent
+├── docs/
+│   └── mistral-caller.yml     # caller workflow to copy into each project
+├── requirements.txt
+└── README.md
+```

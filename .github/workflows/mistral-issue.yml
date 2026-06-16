@@ -1,0 +1,142 @@
+name: Mistral Issue Handler
+
+on:
+  workflow_call:
+    inputs:
+      issue_number:
+        description: GitHub issue number to process
+        required: true
+        type: number
+      issue_title:
+        description: Title of the issue
+        required: true
+        type: string
+      issue_body:
+        description: Body of the issue
+        required: false
+        type: string
+        default: ""
+    secrets:
+      AI_API_KEY:
+        description: API key for the AI provider (Mistral by default)
+        required: true
+      GH_PAT:
+        description: Personal access token with repo, workflow, issues, and pull-requests scopes
+        required: true
+
+jobs:
+  handle-issue:
+    name: Handle issue
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: write
+      pull-requests: write
+      issues: write
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GH_PAT }}
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Configure git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Compute branch name
+        id: branch
+        env:
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          ISSUE_TITLE: ${{ inputs.issue_title }}
+        run: |
+          slug=$(echo "$ISSUE_TITLE" \
+            | tr '[:upper:]' '[:lower:]' \
+            | sed 's/[^a-z0-9 ]//g' \
+            | tr ' ' '-' \
+            | sed 's/-\+/-/g' \
+            | cut -c1-50 \
+            | sed 's/-$//')
+          branch="feature/issue-${ISSUE_NUMBER}-${slug}"
+          echo "name=${branch}" >> "$GITHUB_OUTPUT"
+
+      - name: Create branch
+        env:
+          BRANCH: ${{ steps.branch.outputs.name }}
+        run: git checkout -b "$BRANCH"
+
+      - name: Run AI agent
+        env:
+          AI_PROVIDER: ${{ vars.AI_PROVIDER || 'mistral' }}
+          AI_API_KEY: ${{ secrets.AI_API_KEY }}
+          AI_BASE_URL: ${{ vars.AI_BASE_URL }}
+          AI_MODEL: ${{ vars.AI_MODEL }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          ISSUE_TITLE: ${{ inputs.issue_title }}
+          ISSUE_BODY: ${{ inputs.issue_body }}
+          REPO: ${{ github.repository }}
+        run: python scripts/ai_agent.py
+
+      - name: Protect workflow files
+        run: |
+          git reset -- .github/workflows/ 2>/dev/null || true
+          git checkout -- .github/workflows/ 2>/dev/null || true
+          git clean -fd .github/workflows/ 2>/dev/null || true
+
+      - name: Commit and push changes
+        id: commit
+        env:
+          BRANCH: ${{ steps.branch.outputs.name }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+        run: |
+          if git diff --quiet && git diff --staged --quiet; then
+            echo "No changes produced by the agent; nothing to commit."
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          git add -A
+          git commit -m "feat: implement issue #${ISSUE_NUMBER} via Mistral"
+          git push origin "$BRANCH"
+          echo "changed=true" >> "$GITHUB_OUTPUT"
+
+      - name: Open pull request
+        id: pr
+        if: steps.commit.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          BRANCH: ${{ steps.branch.outputs.name }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          ISSUE_TITLE: ${{ inputs.issue_title }}
+        run: |
+          pr_url=$(gh pr create \
+            --title "feat: $ISSUE_TITLE" \
+            --body "Closes #${ISSUE_NUMBER}
+
+          Implemented automatically by the Mistral agent in response to issue #${ISSUE_NUMBER}.
+
+          Status: awaiting-review" \
+            --label "awaiting-review" \
+            --base main \
+            --head "$BRANCH" \
+            2>/dev/null || gh pr view "$BRANCH" --json url -q .url)
+          echo "url=${pr_url}" >> "$GITHUB_OUTPUT"
+
+      - name: Comment on issue
+        if: steps.commit.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_PAT }}
+          ISSUE_NUMBER: ${{ inputs.issue_number }}
+          PR_URL: ${{ steps.pr.outputs.url }}
+        run: |
+          gh issue comment "$ISSUE_NUMBER" \
+            --body "The Mistral agent has opened a pull request to address this issue: ${PR_URL}"
